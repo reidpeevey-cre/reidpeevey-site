@@ -754,8 +754,9 @@ a.rpPill:hover {background-color: var(--r-teal); color: #fff; text-decoration: n
 .rpProof li {margin: 0 0 10px 0; line-height: 1.8rem;}
 
 /* Text-only service card (no image) — homepage "What we do" section.
-   1 col on phone, 2 on tablet, 4 on desktop; own grid so it doesn't disturb
-   .rpLane's 3-column breakpoints used elsewhere (property listing lanes). */
+   1 col on phone, 2 on tablet, 3 from 1024-1199px, 5 at >=1200px; own grid so
+   it doesn't disturb .rpLane's 3-column breakpoints used elsewhere (property
+   listing lanes). */
 .rpSvcGrid {display: grid; grid-template-columns: 1fr; grid-column-gap: 30px; grid-row-gap: 30px;}
 .rpSvcCard {display: flex; flex-direction: column; height: 100%; border: 1px solid #E7E3E0; background: #fff; padding: 24px;}
 .rpSvcCard h3 {font-family: 'GeneralSans', trebuchet ms, arial, verdana, sans-serif; font-size: 1.2rem; line-height: 1.7rem; font-weight: 600; margin: 0 0 8px 0;}
@@ -770,7 +771,11 @@ a.rpPill:hover {background-color: var(--r-teal); color: #fff; text-decoration: n
 }
 
 @media screen and (min-width: 1024px) {
-	.rpSvcGrid {grid-template-columns: 1fr 1fr 1fr 1fr;}
+	.rpSvcGrid {grid-template-columns: 1fr 1fr 1fr;}
+}
+
+@media screen and (min-width: 1200px) {
+	.rpSvcGrid {grid-template-columns: 1fr 1fr 1fr 1fr 1fr;}
 }
 
 @media screen and (min-width: 768px) {
