@@ -14,7 +14,10 @@ it is:
      generator. An empty lane gets the same `<p class="rpLaneEmpty">` line
      `build_page.py` emits, with that lane's `lane_empty` text.
   2. `numberOfItems` and `itemListElement` of the ItemList node in the page's
-     own JSON-LD block, built by `itemlist.listing_node()` from the same rows.
+     own JSON-LD block, built by `itemlist.listing_node()` from the same rows,
+     with the same lane-side links. The block is serialized by `dump_ld()`:
+     `json.dumps(indent=1)` with `</` written `<\/` and `<!--` written
+     `\u003c!--`, so no listing text can close the <script> element.
 
 Why splice: the pages carry later hand edits (internal-link fixes, footer and
 nav changes) that a spec rebuild would not reproduce.
@@ -26,11 +29,14 @@ Guards. Any of these exits nonzero and writes NOTHING:
     on-page total (a Buildout outage must not blank the pages);
   * a page does not hold exactly one card region and exactly one ItemList
     JSON-LD block, holds a card outside that region, has mixed line endings,
-    or its JSON-LD does not round-trip byte-for-byte through `json.dumps`.
+    or its JSON-LD does not round-trip byte-for-byte through `dump_ld()`;
+  * self-check: a rebuilt page would fail any of those checks on the next run,
+    or rebuilding it again from the same pull would not be a no-op. So a bad
+    page can never be written, and a written page never blocks the next run.
 
 Every page is read and checked before Buildout is called, and every page is
-built before the first one is written. Line endings are preserved: CRLF on a
-Windows checkout with autocrlf, LF on the Actions runner.
+built and self-checked before the first one is written. Line endings are
+preserved: CRLF on a Windows checkout with autocrlf, LF on the Actions runner.
 
 Idempotent: a second run on the same data changes nothing. `--dry-run` prints
 the per-lane added / removed / changed cards and writes nothing. The payload is
@@ -81,6 +87,13 @@ def read_page(path):
     LF round trip reproduces the file exactly before anything else happens."""
     with open(path, "rb") as fh:
         raw = fh.read()
+    text, nl = decode(raw, path)
+    return text, nl, raw
+
+
+def decode(raw, path):
+    """(LF text, newline) from page bytes, with the line-ending checks. The
+    self-check runs this same function on every rebuilt page."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -95,11 +108,22 @@ def read_page(path):
         raise Abort("%s: mixed line endings (%d CRLF of %d LF)" % (path, crlf, text.count("\n")))
     if encode(text, nl) != raw:
         raise Abort("%s: line-ending round trip is not byte-identical" % path)
-    return text, nl, raw
+    return text, nl
 
 
 def encode(text, nl):
     return (text.replace("\n", nl) if nl != "\n" else text).encode("utf-8")
+
+
+def dump_ld(schema):
+    """The page JSON-LD as the generator writes it (`json.dumps(indent=1)`),
+    made safe inside <script>: `</` becomes `<\\/` and `<!--` becomes
+    `\\u003c!--`. Both are plain JSON escapes, so the data is unchanged. (`<\\!--`
+    is not a JSON escape; json.loads would reject it.) `<` only occurs inside
+    string values here, so the text replacement cannot touch the structure."""
+    return (json.dumps(schema, indent=1)
+            .replace("<!--", "\\u003c!--")
+            .replace("</", "<\\/"))
 
 
 # ---------------------------------------------------------------- page parse
@@ -136,8 +160,8 @@ def parse(path, text):
         schema = json.loads(script.group(1))
     except ValueError as exc:
         raise Abort("%s: ItemList JSON-LD does not parse: %s" % (path, exc)) from None
-    if json.dumps(schema, indent=1) != script.group(1):
-        raise Abort("%s: ItemList JSON-LD is not in json.dumps(indent=1) form; "
+    if dump_ld(schema) != script.group(1):
+        raise Abort("%s: ItemList JSON-LD is not in dump_ld() form; "
                     "refusing to rewrite it" % path)
     graph = schema.get("@graph") if isinstance(schema, dict) else None
     nodes = [n for n in (graph or []) if isinstance(n, dict) and n.get("@type") == "ItemList"]
@@ -158,6 +182,7 @@ def parse(path, text):
 def rebuild(text, parsed, props, lane):
     """The page text with both regions replaced, plus the new card list."""
     html_cards, listings = lanes.cards_for(props, lane["filter"])
+    side = lanes.LANE_SIDE[lane["filter"]]
     if listings:
         inner = LANE_OPEN + html_cards + "\n" + LANE_CLOSE
     else:
@@ -165,14 +190,35 @@ def rebuild(text, parsed, props, lane):
 
     node = parsed["node"]
     node["numberOfItems"] = len(listings)
-    node["itemListElement"] = itemlist.item_list_elements(listings)
-    ld = json.dumps(parsed["schema"], indent=1)
+    node["itemListElement"] = itemlist.item_list_elements(listings, side)
+    ld = dump_ld(parsed["schema"])
 
     region, script = parsed["region"], parsed["script"]
     out = (text[:script.start(1)] + ld + text[script.end(1):region.start(2)]
            + inner + text[region.end(2):])
-    new_cards = [(lanes.deep_link(p), lanes.card_html(p), p) for p in listings]
+    new_cards = [(lanes.deep_link(p, side), lanes.card_html(p, "\t\t", side), p)
+                 for p in listings]
     return out, new_cards
+
+
+def self_check(pg, props):
+    """Run on a rebuilt page exactly what the next run would run first (line
+    endings, both region detections), confirm it holds the cards just built,
+    and confirm a second rebuild from the same pull changes nothing."""
+    page = pg["lane"]["page"]
+    try:
+        text, nl = decode(pg["new_raw"], page)
+        parsed = parse(page, text)
+    except Abort as exc:
+        raise Abort("self-check: the rebuilt page would not pass the next run: %s" % exc) from None
+    if nl != pg["nl"]:
+        raise Abort("self-check: %s: line endings changed from %r to %r" % (page, pg["nl"], nl))
+    if len(parsed["cards"]) != len(pg["new_cards"]) or parsed["node"]["numberOfItems"] != len(pg["new_cards"]):
+        raise Abort("self-check: %s: rebuilt page holds %d cards / numberOfItems %s, built %d"
+                    % (page, len(parsed["cards"]), parsed["node"]["numberOfItems"], len(pg["new_cards"])))
+    again, _ = rebuild(text, parsed, props, pg["lane"])
+    if encode(again, nl) != pg["new_raw"]:
+        raise Abort("self-check: %s: a second rebuild from the same pull is not a no-op" % page)
 
 
 def card_key(href):
@@ -220,7 +266,7 @@ def run(args):
         pages.append(dict(lane=lane, path=path, text=text, nl=nl, raw=raw,
                           parsed=parse(lane["page"], text)))
 
-    props = lanes.load(args.offline, args.limit)
+    props = lanes.load(args.offline)
     if not props:
         raise Abort("Buildout returned 0 properties; nothing written")
 
@@ -240,6 +286,10 @@ def run(args):
     if new_total < MIN_RATIO * old_total:
         raise Abort("new card total %d is under %d%% of the current %d; refusing to write"
                     % (new_total, MIN_RATIO * 100, old_total))
+
+    # Before anything is staged: every rebuilt page must pass the next run.
+    for pg in pages:
+        self_check(pg, props)
 
     changed = [pg for pg in pages if pg["new_raw"] != pg["raw"]]
     if args.dry_run:
@@ -267,7 +317,6 @@ def main():
                     help="read this payload JSON (must be outside the repo) instead of calling Buildout")
     ap.add_argument("--site", default=lanes.REPO,
                     help="site root holding the pages (default: this repo)")
-    ap.add_argument("--limit", type=int, default=200)
     args = ap.parse_args()
     try:
         return run(args)

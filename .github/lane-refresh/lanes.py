@@ -7,7 +7,7 @@ generated here, not a filtered Buildout iframe. The iframe is cross-origin so
 it is worth exactly zero for SEO; these cards are real HTML on our own domain.
 `refresh_lanes.py` imports `cards_for()` and splices the result into the pages.
 
-    BUILDOUT_API_KEY=... python .github/lane-refresh/lanes.py [--limit 200]
+    BUILDOUT_API_KEY=... python .github/lane-refresh/lanes.py
     python .github/lane-refresh/lanes.py --offline C:\\scratch\\payload.json
 
 Changes from the Media Server original, and nothing else:
@@ -23,14 +23,23 @@ Changes from the Media Server original, and nothing else:
     public, meaning `<side>`, `<side>_listing_published` and
     `<side>_listing_searchable` are all set and `<side>_proposal` is not. The
     side-agnostic lanes (industrial, restaurant) need at least one public side,
-    and `deep_link()` only ever points at a public side.
-  * A live pull that comes back with `limit` rows or more, or with fewer rows
-    than the payload's own `count`, is refused as possibly truncated instead of
-    silently dropping listings.
+    and `deep_link()` only ever points at a public side. A side that is not
+    public is masked off the card (`public_view()`), so its price and
+    availability never show.
+  * Lane-side deep links: the lease lanes link a listing's lease side and the
+    land lane its sale side; industrial and restaurant keep the original
+    sale-first order. A Buildout listing URL is used only when it starts with
+    `https://` or `http://`, otherwise the /properties embed link stands in.
+  * Every Buildout string that reaches a card or the ItemList goes through
+    `clean()`, which turns each run of control characters into one space, so a
+    stray newline in a name can never break the page structure.
+  * The live pull pages through Buildout 100 rows at a time until a short page,
+    dedupes by id, and refuses a pull that hits the 20-page cap or comes back
+    with fewer rows than the first page's `count`.
 
 Card markup, filters, sort order, the broker map, the fallback image and the
-price, size and availability logic are unchanged, so an unchanged listing
-renders byte-identical to what is on the pages today.
+price, size and availability logic are otherwise unchanged, so an unchanged
+listing renders byte-identical to what is on the pages today.
 
 FIELD NOTE (probed 2026-08-26, 96 on-market properties): `properties.json`
 carries `hide_sale_price` + `sale_price_dollars`, but it carries NO lease rate
@@ -45,13 +54,16 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
-API = "https://buildout.com/api/v1/%s/properties.json?on_market_only=true&limit=%d"
+API = "https://buildout.com/api/v1/%s/properties.json?on_market_only=true&limit=%d&offset=%d"
+PAGE_SIZE = 100
+MAX_PAGES = 20
 KEY_ENV = "BUILDOUT_API_KEY"
 
 # Buildout broker id -> display name. Copied from the BPO engine's own map,
@@ -90,17 +102,47 @@ def _scrub(text, key):
     return str(text).replace(key, "***") if key else str(text)
 
 
-def fetch(limit=200):
-    """Live pull. The key never reaches stdout, stderr or disk, and nothing is
-    cached. Errors are re-raised without the request URL, which carries the key."""
-    key = api_key()
+def _get(url, key):
     try:
-        with urllib.request.urlopen(API % (key, limit), timeout=120) as fh:
+        with urllib.request.urlopen(url, timeout=120) as fh:
             payload = json.load(fh)
     except Exception as exc:  # noqa: BLE001 - re-raised as a scrubbed message
         raise SystemExit("Buildout pull failed: %s: %s"
                          % (type(exc).__name__, _scrub(exc, key))) from None
+    if not isinstance(payload, dict):
+        raise SystemExit("Buildout pull failed: the response is not a JSON object")
     return payload
+
+
+def fetch():
+    """Live pull, paged 100 rows at a time until a short page, the way the
+    vault's other Buildout clients page (`bpo-automation/buildout_comps.py`).
+    Rows are deduped by id. The key never reaches stdout, stderr or disk, and
+    nothing is cached. Errors are re-raised without the request URL, which
+    carries the key."""
+    key = api_key()
+    rows, seen, count = [], set(), None
+    for page in range(MAX_PAGES):
+        payload = _get(API % (key, PAGE_SIZE, page * PAGE_SIZE), key)
+        batch = payload.get("properties") or []
+        if page == 0 and isinstance(payload.get("count"), int):
+            count = payload["count"]
+        for p in batch:
+            pid = p.get("id") if isinstance(p, dict) else None
+            if pid is not None:
+                if pid in seen:
+                    continue
+                seen.add(pid)
+            rows.append(p)
+        if len(batch) < PAGE_SIZE:
+            break
+    else:
+        raise SystemExit("Buildout pull hit the %d-page cap (%d rows); refusing a "
+                         "possibly partial pull" % (MAX_PAGES, len(rows)))
+    if count is not None and len(rows) < count:
+        raise SystemExit("Buildout pull looks truncated: %d rows, first page says count %d"
+                         % (len(rows), count))
+    return {"count": count, "properties": rows}
 
 
 def _inside_repo(path):
@@ -122,21 +164,14 @@ def load_payload(path):
         return json.load(fh)
 
 
-def load(offline=None, limit=200):
+def load(offline=None):
     """The property list. `offline` is a payload path, or None for a live pull."""
-    payload = load_payload(offline) if offline else fetch(limit)
+    payload = load_payload(offline) if offline else fetch()
     if isinstance(payload, list):
-        props = payload
-    elif isinstance(payload, dict):
-        props = payload.get("properties") or []
-    else:
-        raise SystemExit("Buildout payload is neither an object nor a list")
-    if not offline:
-        total = payload.get("count") if isinstance(payload, dict) else None
-        if len(props) >= limit or (isinstance(total, int) and total > len(props)):
-            raise SystemExit("Buildout returned %d rows (count %s, limit %d): possibly "
-                             "truncated. Raise --limit." % (len(props), total, limit))
-    return props
+        return payload
+    if isinstance(payload, dict):
+        return payload.get("properties") or []
+    raise SystemExit("Buildout payload is neither an object nor a list")
 
 
 # --------------------------------------------------------- public-only guard
@@ -256,24 +291,36 @@ def listed_on(p):
     return max(p.get("sale_listed_on") or "", p.get("lease_listed_on") or "")
 
 
-def deep_link(p):
+def _web_url(url):
+    """Only an absolute http(s) URL is trusted as a card link."""
+    return isinstance(url, str) and url.startswith(("https://", "http://"))
+
+
+def _embed_link(p, side):
+    return "/properties/?propertyId=%s-%s" % (p.get("id"), side)
+
+
+def deep_link(p, prefer=None):
     """Where a card points. Buildout's own listing URL when it published one,
     otherwise the /properties embed deep link, which the payload's slug spells.
-    Only a public side is ever linked; with both sides public this is the
-    original sale-first order. (No public side at all cannot reach here through
-    `select()`; it keeps the original behaviour.)"""
+    Only a public side is ever linked. `prefer` is the lane's side: a lease lane
+    links the lease side, the land lane the sale side. With no preference (the
+    side-agnostic lanes) it is the original sale-first order. A listing URL that
+    is not http(s) is never used. (No public side at all cannot reach here
+    through `select()`; it keeps the original behaviour.)"""
     sides = public_sides(p)
+    if prefer in sides:
+        url = p.get(prefer + "_listing_url")
+        return url if _web_url(url) else _embed_link(p, prefer)
     for side in sides:
-        if p.get(side + "_listing_url"):
+        if _web_url(p.get(side + "_listing_url")):
             return p[side + "_listing_url"]
     if sides:
-        kind = sides[0]
-    else:
-        for key in ("sale_listing_url", "lease_listing_url"):
-            if p.get(key):
-                return p[key]
-        kind = "sale" if p.get("sale") else "lease"
-    return "/properties/?propertyId=%s-%s" % (p.get("id"), kind)
+        return _embed_link(p, sides[0])
+    for key in ("sale_listing_url", "lease_listing_url"):
+        if _web_url(p.get(key)):
+            return p[key]
+    return _embed_link(p, "sale" if p.get("sale") else "lease")
 
 
 def photo(p):
@@ -369,18 +416,28 @@ def broker_name(p):
 
 # -------------------------------------------------------------- card render
 
+CONTROL_RUN = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def clean(s):
+    """Each run of control characters (newline, CR, tab, NUL, DEL...) becomes
+    one space. Applied to every Buildout string that reaches a card or the
+    ItemList; anything that is not a string passes through untouched."""
+    return CONTROL_RUN.sub(" ", s) if isinstance(s, str) else s
+
+
 def e(s):
-    return html.escape(str(s or ""), quote=True)
+    return html.escape(clean(str(s or "")), quote=True)
 
 
-def card_html(p, indent="\t\t"):
+def card_html(p, indent="\t\t", prefer=None):
     name = p.get("name") or p.get("address") or "Commercial property"
     alt = "%s, %s, TX" % (name, p.get("city") or "Waco")
     specs = " \u00b7 ".join(x for x in (size_line(p), availability(p)) if x)
     price = price_line(p)
     broker = broker_name(p)
     lines = [
-        '%s<a class="rpCard" href="%s">' % (indent, e(deep_link(p))),
+        '%s<a class="rpCard" href="%s">' % (indent, e(deep_link(p, prefer))),
         '%s\t<img src="%s" alt="%s" loading="lazy">' % (indent, e(photo(p)), e(alt)),
         '%s\t<div class="rpCardBody">' % indent,
         '%s\t\t<h3>%s</h3>' % (indent, e(name)),
@@ -409,9 +466,11 @@ def select(props, filter_key):
 
 def cards_for(props, filter_key, indent="\t\t"):
     """(html, listings) - the grid's inner cards plus the records behind them so
-    the caller can build the ItemList schema from the same rows."""
+    the caller can build the ItemList schema from the same rows. Cards link the
+    lane's own side (`LANE_SIDE`)."""
     picked = select(props, filter_key)
-    return "\n".join(card_html(p, indent) for p in picked), picked
+    side = LANE_SIDE[filter_key]
+    return "\n".join(card_html(p, indent, side) for p in picked), picked
 
 
 def browse_by_type(props):
@@ -426,10 +485,9 @@ def main():
     ap = argparse.ArgumentParser(description="Per-lane listing counts from Buildout.")
     ap.add_argument("--offline", metavar="PATH", default=None,
                     help="read this payload JSON (outside the repo) instead of calling Buildout")
-    ap.add_argument("--limit", type=int, default=200)
     args = ap.parse_args()
 
-    props = load(args.offline, args.limit)
+    props = load(args.offline)
     print("on-market listings: %d  (%s)"
           % (len(props), "offline payload" if args.offline else "live pull, nothing cached"))
     print()

@@ -21,8 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Always the current main, so a run that sat in the queue never rebuilds
+      # from the SHA that triggered it.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -35,8 +39,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python .github/lane-refresh/refresh_lanes.py
 
-      - name: Allowed-files guard
+      - name: Allowed-files and block-level guard
         id: guard
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -euo pipefail
           allowed='commercial-property-for-lease-waco/index.html
@@ -70,6 +76,12 @@ jobs:
             echo "Refusing to commit."
             exit 1
           fi
+          # Independent second opinion: only the card grid and the ItemList
+          # block may differ from HEAD. Shares no code with refresh_lanes.py.
+          if ! python .github/lane-refresh/check_regions.py; then
+            echo "Refusing to commit."
+            exit 1
+          fi
           if [ -n "$changed" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             printf 'Changed:\n%s\n' "$changed"
@@ -92,7 +104,24 @@ jobs:
             restaurant-space-waco/index.html \
             commercial-land-for-sale-waco/index.html
           git commit -m "Lane refresh $(TZ=America/Chicago date +%F) (auto)"
-          git push
+          # Rebase onto whatever reached main since checkout, then push; one
+          # retry of the pair. A conflict aborts the rebase and fails the run.
+          pushed=0
+          for attempt in 1 2; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              pushed=1
+              break
+            fi
+            git rebase --abort 2>/dev/null || true
+            if [ "$attempt" -eq 1 ]; then
+              echo "::warning::pull/push failed; retrying once"
+              sleep 15
+            fi
+          done
+          if [ "$pushed" -ne 1 ]; then
+            echo "::error::push failed twice; nothing published"
+            exit 1
+          fi
 
       # Belt and braces: a push made with GITHUB_TOKEN may not start the
       # branch-based Pages build on its own, so ask for one explicitly.
