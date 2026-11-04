@@ -1,0 +1,105 @@
+# Daily refresh of the six type pages' listing cards from live Buildout.
+# Code and guards: .github/lane-refresh/README.md
+name: Lane refresh
+
+on:
+  schedule:
+    - cron: '15 12 * * *'   # 6:15 AM CST / 7:15 AM CDT; GitHub cron is UTC and can run late
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: lane-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'reidpeevey-cre/reidpeevey-site'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Refresh lane pages from Buildout
+        env:
+          BUILDOUT_API_KEY: ${{ secrets.BUILDOUT_API_KEY }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python .github/lane-refresh/refresh_lanes.py
+
+      - name: Allowed-files guard
+        id: guard
+        run: |
+          set -euo pipefail
+          allowed='commercial-property-for-lease-waco/index.html
+          retail-space-for-lease-waco/index.html
+          industrial-property-waco/index.html
+          warehouse-for-lease-waco/index.html
+          restaurant-space-waco/index.html
+          commercial-land-for-sale-waco/index.html'
+          allowed="$(printf '%s\n' "$allowed" | sed 's/^[[:space:]]*//')"
+          changed="$(git diff --name-only)"
+          untracked="$(git ls-files --others --exclude-standard)"
+          staged="$(git diff --cached --name-only)"
+          bad=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! printf '%s\n' "$allowed" | grep -qxF -- "$f"; then
+              echo "::error::change outside the six lane pages: $f"
+              bad=1
+            fi
+          done <<< "$changed"
+          if [ -n "$untracked" ]; then
+            echo "::error::unexpected new files:"
+            printf '%s\n' "$untracked"
+            bad=1
+          fi
+          if [ -n "$staged" ]; then
+            echo "::error::unexpected staged changes"
+            bad=1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "Refusing to commit."
+            exit 1
+          fi
+          if [ -n "$changed" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            printf 'Changed:\n%s\n' "$changed"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes."
+          fi
+
+      - name: Commit and push
+        if: steps.guard.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- \
+            commercial-property-for-lease-waco/index.html \
+            retail-space-for-lease-waco/index.html \
+            industrial-property-waco/index.html \
+            warehouse-for-lease-waco/index.html \
+            restaurant-space-waco/index.html \
+            commercial-land-for-sale-waco/index.html
+          git commit -m "Lane refresh $(TZ=America/Chicago date +%F) (auto)"
+          git push
+
+      # Belt and braces: a push made with GITHUB_TOKEN may not start the
+      # branch-based Pages build on its own, so ask for one explicitly.
+      - name: Request Pages build
+        if: steps.guard.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --silent \
+            || echo "::warning::Pages build request failed; the push may still have started one"

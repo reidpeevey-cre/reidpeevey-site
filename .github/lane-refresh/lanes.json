@@ -1,0 +1,35 @@
+{
+ "_note": "The six type pages refresh_lanes.py splices. filter = a lanes.FILTERS key; page = path from the repo root; lane_empty = the paragraph shown when a lane has no listings, copied from the Media Server tools/page-specs (restaurant has its own; the other five use build_page.py's default).",
+ "lanes": [
+  {
+   "filter": "all_lease",
+   "page": "commercial-property-for-lease-waco/index.html",
+   "lane_empty": "Nothing is on the market in this category right now. Tell us what you need in the form below and we will call you when something fits."
+  },
+  {
+   "filter": "retail_lease",
+   "page": "retail-space-for-lease-waco/index.html",
+   "lane_empty": "Nothing is on the market in this category right now. Tell us what you need in the form below and we will call you when something fits."
+  },
+  {
+   "filter": "industrial",
+   "page": "industrial-property-waco/index.html",
+   "lane_empty": "Nothing is on the market in this category right now. Tell us what you need in the form below and we will call you when something fits."
+  },
+  {
+   "filter": "warehouse_lease",
+   "page": "warehouse-for-lease-waco/index.html",
+   "lane_empty": "Nothing is on the market in this category right now. Tell us what you need in the form below and we will call you when something fits."
+  },
+  {
+   "filter": "restaurant",
+   "page": "restaurant-space-waco/index.html",
+   "lane_empty": "Nothing restaurant-ready is on the market right now. Tell us your concept and the corridors that work in the form below and we will call you when something fits."
+  },
+  {
+   "filter": "land_sale",
+   "page": "commercial-land-for-sale-waco/index.html",
+   "lane_empty": "Nothing is on the market in this category right now. Tell us what you need in the form below and we will call you when something fits."
+  }
+ ]
+}

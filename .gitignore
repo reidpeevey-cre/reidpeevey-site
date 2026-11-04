@@ -1,0 +1,10 @@
+# Buildout payloads and caches never belong in this public repo: the raw
+# properties.json carries internal fields (notes, custom fields, documents).
+*.payload.json
+lanes.cache.json
+properties.json
+# Python bytecode from .github/lane-refresh/
+__pycache__/
+*.pyc
+# refresh_lanes.py staging files (only exist mid-write)
+*.lane-refresh.tmp
